@@ -1,0 +1,169 @@
+1. Создал новый файл с именем docker-compose.yml и добавил
+
+version: "3.9"
+
+services:
+  traefik:
+    image: traefik:v2.7
+    command:
+      - --log.level=INFO
+      - --api.insecure=true
+
+    ports:
+      - "8080:8080"
+
+Запустил с помощью команды docker stack deploy -c docker-compose.yml traefik
+Теперь можно перейти к приборной панели Traefik http://localhost:8080 и просмотреть ее.
+
+2. Настроить доступ извне через один traefik до обоих стеков containous/whoami по разным
+доменам.
+
+Внес следующие изменения и перезапустил docker-compose.
+
+
+version: "3.9"
+
+services:
+  traefik:
+    image: traefik:v2.7
+    command:
+      - --log.level=INFO
+      - --api.insecure=true
+      - --entrypoints.web.address=:80
+      - --providers.docker
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    labels:
+      traefik.http.routers.dash.rule: Host(`dash.localhost`)
+      traefik.http.routers.dash.service: api@internal
+
+    ports:
+      - "80:80"
+
+  hello:
+    image: containous/whoami
+    labels: # auto-detects port 80 in next line
+      traefik.http.routers.hello.rule: Host(`hello.localhost`)
+
+  whoami:
+    image: jwilder/whoami
+    labels: # auto-detects port 8000 in next line
+      traefik.http.routers.whoami.rule: Host(`hi.localhost`)
+
+Перешел по http://hello.localhost и http://hi.localhost, убедился что работает
+
+3. Конфигурация для traefik - формат TOML
+
+Добавил два домена в базу днс:
+sudo nano /etc/hosts
+127.0.0.1         traefik.linuxtechi.local
+127.0.0.1         blog.linuxtechi.local
+
+Установил зашифрованный пароль для доступа к панели управления traefik:
+sudo apt-get install -y apache2-utils
+htpasswd -nb admin password123
+
+Создал файл traefik.toml со следующим содержимым:
+
+[entryPoints]
+  [entryPoints.web]
+    address = ":80"
+    [entryPoints.web.http.redirections.entryPoint]
+      to = "websecure"
+      scheme = "https"
+  [entryPoints.websecure]
+    address = ":443"
+
+[api]
+  dashboard = true
+[certificatesResolvers.lets-encrypt.acme]
+  email = "info@linuxtechi.local"
+  storage = "acme.json"
+  [certificatesResolvers.lets-encrypt.acme.tlsChallenge]
+
+[providers.docker]
+  watch = true
+  network = "web"
+
+[providers.file]
+  filename = "traefik_secure.toml"
+
+Создал файл traefik_secure.toml со следующим содержимым:
+
+[http.middlewares.simpleAuth.basicAuth]
+  users = [
+    "admin:$вставил зашифрованный пароль/"
+  ]
+
+[http.routers.api]
+  rule = "Host(`traefik.linuxtechi.local`)"
+  entrypoints = ["websecure"]
+  middlewares = ["simpleAuth"]
+  service = "api@internal"
+  [http.routers.api.tls]
+    certResolver = "lets-encrypt"
+
+Создал новую сеть докеров для использования прокси-сервером в контейнерах:
+docker network create web
+
+Создал пустой файл и изменил права:
+touch acme.json
+chmod 600 acme.json
+
+Создал контейнер traefik, используя следующую команду:
+    docker run -d \
+   -v /var/run/docker.sock:/var/run/docker.sock \
+   -v $PWD/traefik.toml:/traefik.toml \
+   -v $PWD/traefik_secure.toml:/traefik_secure.toml \
+   -v $PWD/acme.json:/acme.json \
+   -p 80:80 \
+   -p 443:443 \
+   --network web \
+   --name traefik \
+    traefik:v2.7
+
+Перешел по адресу https://your_domain.com/dashboard/ , убедился, что работает.
+
+4. Docker labels в docker-compose.yml
+
+version: "3.9"
+networks:
+  web:
+    external: true
+  internal:
+    external: false
+services:
+  wordpress:
+    image: wordpress:latest
+    environment:
+      WORDPRESS_DB_HOST: mysql:3306
+      WORDPRESS_DB_USER: dbuser
+      WORDPRESS_DB_PASSWORD: dbpass@123#
+      WORDPRESS_DB_NAME: wordpress_db
+    labels:
+      - traefik.http.routers.blog.rule=Host(`blog.linuxtechi.local`)
+      - traefik.http.routers.blog.tls=true
+      - traefik.http.routers.blog.tls.certresolver=lets-encrypt
+      - traefik.port=80
+    networks:
+      - internal
+      - web
+    depends_on:
+      - mysql
+
+  mysql:
+    image: mysql:latest
+    environment:
+      MYSQL_ROOT_PASSWORD: sqlpass@123#
+      MYSQL_DATABASE: wordpress_db
+      MYSQL_USER: dbuser
+      MYSQL_PASSWORD: dbpass@123#
+    networks:
+      - internal
+    labels:
+      - traefik.enable=false
+
+Выполнил команду docker-compose up -d, теперь после перехода на https://your_domain.com/dashboard/ добавились новые контейнеры в HTTP.
+Перейдя по ссылке https://blog.linuxtechi.local, сайт работает. 

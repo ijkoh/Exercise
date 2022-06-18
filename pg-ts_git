@@ -1,0 +1,95 @@
+1. Cоздание проекта:
+$ mkdir pg-ts && cd pg-ts
+touch docker-compose.yml
+
+2. Создал, внес данные в docker-compose.yml и зашел в контейнер:
+docker stack deploy -c docker-compose.yml pg-ts
+docker ps
+docker exec -ti container_id /bin/bash
+
+version: '3.9'
+
+volumes:
+  postgres-data:
+
+services:
+  postgres:
+    image: timescale/timescaledb-postgis:2.3.0-pg13
+    volumes:
+     - postgres-data:/var/lib/postgresql/data
+    shm_size: '2gb'
+    logging:
+      options:
+        max-size: "99M"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: somesecretpassword
+
+3. Создание базы данных и гипертаблицы timescale:
+psql -U postgres
+CREATE DATABASE название дб;
+\c ert;
+
+CREATE TABLE stocks_real_time (
+  time TIMESTAMPTZ NOT NULL,
+  symbol TEXT NOT NULL,
+  price DOUBLE PRECISION NULL,
+  day_volume INT NULL
+);
+
+SELECT create_hypertable('stocks_real_time','time');
+
+CREATE TABLE company (
+  symbol TEXT NOT NULL,
+  name TEXT NOT NULL
+);
+
+
+4. Скрипты бекап бд и восстановление бд:
+
+./pg-backup.sh
+
+#!/bin/bash
+set -ex
+#configuration settings
+POSTGRES_USER=postgres
+POSTGRES_DB=ert
+BACKUPS_PATH=/home/xoth/pg-ts/
+DOCKER_SWARM_SERVICE_NAME=pg-ts_postgres
+#
+postgres_container_id=$(docker service ps -f "name=$DOCKER_SWARM_SERVICE_NAME" $DOCKER_SWARM_SERVICE_NAME -q --no-trunc | head -n1)
+docker exec -t pg-ts_postgres.1."$postgres_container_id" pg_dump -U $POSTGRES_USER -Fc -f /tmp/ert.bak $POSTGRES_DB 
+# md5sum * > MD5SUMS
+echo 'Done.' 
+
+./pg-restore.sh
+
+#!/bin/bash
+set -ex
+#configuration settings
+POSTGRES_USER=postgres
+POSTGRES_DB=ert
+BACKUPS_PATH=/home/xoth/pg-ts
+DOCKER_SWARM_SERVICE_NAME=pg-ts_postgres
+#
+#restore PostgreSQL database
+#tar/unzip backup
+BACKUP_FOLDER=$BACKUPS_PATH
+cd "$BACKUP_FOLDER"
+CONTAINER_ID=$(docker ps --filter "status=running" --filter "name=pg-ts_postgres" -q)
+#
+docker exec $CONTAINER_ID psql -U $POSTGRES_USER -c "CREATE DATABASE ert"
+docker exec $CONTAINER_ID psql -U $POSTGRES_USER $POSTGRES_DB -c 'create extension timescaledb;'
+docker exec $CONTAINER_ID psql -U $POSTGRES_USER $POSTGRES_DB -c 'select timescaledb_pre_restore();'
+docker exec \! pg_restore -U postgres -Fc -d ert ert.bak
+docker exec $CONTAINER_ID psql -U $POSTGRES_USER $POSTGRES_DB -c 'select timescaledb_post_restore();'
+echo 'Done.' 
+
+5. crontab
+crontab -e
+# m h  dom mon dow   command
+               5     cd /home/xoth/pg-ts/ $$ ./pg-backup.sh
+               6     cd /home/xoth/pg-ts/ $$ ./pg-restore.sh
+
+
+

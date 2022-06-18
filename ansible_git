@@ -1,0 +1,277 @@
+1. 
+sudo nano /etc/ssh/sshd_config
+Port 4322
+PermitRootLogin no
+AllowUsers user1 user2
+PasswordAuthentication no
+Применил настройки и подключился по shh к удаленной машине, создал пользователей user1, user2.
+
+Cоздание файлов для ansible и внесение данных:
+
+nano inventory.ini
+192.168.0.7  ansible_user=andrey   ansible_ssh_private_key_file=/home/xoth/.ssh/andrey
+
+nano ansible.cfg
+[defaults]
+host_key_cheking = false 
+inventory        = /home/xoth/ansible/inventory.ini
+
+nano main.yml
+---
+  hosts: all
+  become: true
+  vars_files:
+    - main_vars.yml 
+
+  roles: 
+    - ansible_exercise
+
+
+nano main_vars.yml
+---
+  ansible_python_interpreter: /usr/bin/python3
+  ansible_user: andrey
+  ansible_ssh_private_key_file: /home/xoth/.ssh/andrey
+  ansible_port: 4322
+  ansible_sudo_pass: 123123
+
+2.
+Создание пользователей
+Необходимо создать плейбук, который создает пользователей user1, user2 с группами smpt,
+docker, sudo на удаленном сервере.
+
+В файле ansible/roles/ansible_exercise/defaults/main.yml создаем переменные:
+
+three_groups:
+  - smpt
+  - sudo
+  - docker
+
+users: 
+  - user1
+  - user2
+
+
+
+В файле ansible/roles/ansible_exercise/tasks/main.yml пишем задачи для ансибл.
+Создаем группы на удаленной машине:
+
+- name: Create group smpt
+  ansible.builtin.group:
+    name: smpt
+    state: present
+
+- name: Create group docker
+  ansible.builtin.group:
+    name: docker
+    state: present
+
+- name: Create group sudo
+  ansible.builtin.group:
+    name: sudo
+    state: present
+
+И вносим пользователей в эти группы:
+
+- name: Create user1 with groups
+  ansible.builtin.user:
+    name: user1
+    shell: /bin/bash
+    group: "{{ item }}"
+    append: yes
+  loop: "{{ three_groups }}"
+
+- name: Create user2 with groups
+  ansible.builtin.user:
+    name: user2
+    shell: /bin/bash
+    group: "{{ item  }}"
+    append: yes
+  loop: "{{ three_groups }}"
+
+
+Значит для пользователей user1, user2 этот плейбук должен сгенерировать ключи формата
+ecdsa 521 bit, публичные ключи зарегистрировать на удаленном сервере, приватные ключи
+положить локально на хосте, где будет происходить запуск ansible playbook.
+Приватные ключи должны быть сгенерированы с паролем - который тоже должен
+генерироваться во время выполнения плейбука.
+Требования к паролю - длина 20 символов из набора A-Za-z0-9.
+Пользователю должны вывестись эти сгенерированные пароли либо в stdout во время
+выполнения плейбука, либо в какой либо текстовый файл на хосте где запускается плейбук.
+
+
+- name: Password ssh key for user1
+  ansible.builtin.shell:
+    cmd: pwgen -1 -n 20 > /home/xoth/ansible/"password_for_{{ item }}".txt
+  args:
+  delegate_to: localhost
+  loop: "{{ users }}"
+
+
+
+
+- name: Create a 521-bit SSH key for users
+  ansible.builtin.user:
+    generate_ssh_key: yes
+    ssh_key_passphrase: /home/xoth/ansible/password_for_"{{ item }}".txt
+    ssh_key_bits: 521
+    ssh_key_file: .ssh/id_rsa
+    ssh_key_type: ecdsa
+  loop: "{{ users }}"
+
+
+
+
+- name: display password user1 in stdout 
+  ansible.builtin.shell: 
+    cmd: cat /home/xoth/ansible/"{{ item }}".txt
+  register: password_users
+  args:
+  delegate_to: localhost
+  loop: "{{ users }}"
+
+- name: display
+  debug:
+    msg: "{{ item.stdout }}"
+  loop: "{{ password_users.results }}"
+
+
+- name: set a passphrase for the user1 ssh key
+  ansible.builtin.user:
+    name: password_user1
+    ssh_key_passphrase: "{{ password_user1.stdout_lines }}"
+
+- name: set a passphrase for the user2 ssh key
+  ansible.builtin.user:
+    name: password_user2
+    ssh_key_passphrase: "{{ password_user2.stdout_lines }}"
+
+
+- name: create file for password for users
+  file: 
+    path: /home/user1/password_for_"{{ item }}".txt
+    state: touch
+  become: yes 
+  loop: "{{ users }}"
+        
+
+- name: password transfer for users
+  ansible.builtin.copy:
+    src: /home/xoth/ansible/password_for_"{{ item }}".txt
+    dest: /home/password_for_/password_for_"{{ item }}".txt
+  loop: "{{ users }}" 
+
+
+- name: set
+  ansible.builtin.fetch:
+    src: /home/"{{ item }}"/.ssh/id_rsa
+    dest: /home/xoth/ansible
+  loop: "{{ users }}"
+
+
+
+Установка docker, docker-compose
+Создать плейбук с помощью которого можно будет проводить установку docker+dockercompose последней версии на удаленный сервер.
+
+- name: install dependency
+  apt:
+    name: "{{ item }}"
+    state: present
+    update_cache: yes
+  loop:
+    - apt-transport-https
+    - ca-certificates
+    - curl
+    - gnupg-agent
+    - software-properties-common
+
+- name: add GPG key
+  apt_key:
+    url: "https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg"
+    state: present
+
+- name: add docker repository to apt
+  apt_repository:
+    repo: "deb [arch={{ ansible_architecture }}] https://download.docker.com/linux/{{ ansible_distribution | lower }} {{ ansible_distribution_release }} stable"
+    state: present
+
+
+- name: install docker
+  apt: 
+    name: "{{ item }}"
+    state: latest
+    update_cache: yes
+  loop: 
+    - docker-ce
+    - docker-ce-cli
+    - containerd.io
+
+- name: make sure that docker was started and enabled
+  service:
+    name: docker
+    state: started
+    enabled: yes
+
+Развертывание squid
+Нужно чтобы при запуске ansible плейбука он брал шаблонные файлы (docker-compose.yml,
+squid.conf) и можно было задать параметр squid_user, который бы добавлялся в users.txt
+вместе с паролем.
+
+- name: Template a file to /home/xoth/ansible
+  ansible.builtin.template:
+    src: "{{ template_docker }}"
+    dest: /home/user1
+    owner: user1  
+
+- name: Template a file to /home/xoth/ansible
+  ansible.builtin.template:
+    src: "{{ template_squid }}"
+    dest: /home/user1
+    owner: user1 
+
+ 
+- name: Template a file to /home/xoth/ansible
+  ansible.builtin.template:
+    src: "{{ template_docker }}"
+    dest: /home/user2
+    owner: user2 
+
+- name: Template a file to /home/xoth/ansible
+  ansible.builtin.template:
+    src: "{{ template_squid }}"
+    dest: /home/user2
+    owner: user2
+
+Идеальный - пароль генерится, шифруется и хеш попадает в user.txt, сам пароль
+выводится как результат команды:
+
+- name: Password for users
+  ansible.builtin.shell:
+    cmd: pwgen -1 -n 20 > squidpass_"{{ item }}"
+  args:
+  delegate_to: localhost
+  loop: "{{ users }}"
+
+
+
+ - name: encoding squid password users
+   ansible.builtin.shell: 
+     cmd: cat squid_"{{ item }}" | base64 | cat >> /home/xoth/ansible/user.txt
+   args:
+   delegate_to: localhost
+   loop: "{{ users }}"
+
+
+
+- name: display squid password users in stdout 
+  ansible.builtin.shell: 
+    cmd: cat /home/xoth/ansible/squid_{{ item }}.txt
+  register: users
+  args:
+  delegate_to: localhost
+  loop: "{{ users }}"
+
+- name: display
+  debug:
+    msg: "{{ item.stdout }}" 
+  loop: "{{ users.results }}" 
